@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Logistica - Dashboard Operacional</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="layout">
+    <section class="panel form-panel">
+      <h1>Simulador de Ultima Milha</h1>
+      <p class="subtitle">Planejamento de carga, ocupacao e romaneio em ordem de despacho.</p>
+
+      <div id="alert" class="alert hidden"></div>
+
+      <form id="simulacao-form">
+        <div class="grid two-cols">
+          <label>Placa
+            <input type="text" id="placa" value="ABC-1234" required>
+          </label>
+          <label>Carga Maxima (kg)
+            <input type="number" id="cargaMax" value="120" step="0.1" min="0" required>
+          </label>
+          <label>Volume Maximo (m3)
+            <input type="number" id="volumeMax" value="10" step="0.1" min="0" required>
+          </label>
+          <label>Carga Inicial (kg)
+            <input type="number" id="cargaInicial" value="0" step="0.1" min="0" required>
+          </label>
+          <label>Origem X
+            <input type="number" id="origemX" value="0" step="0.1" required>
+          </label>
+          <label>Origem Y
+            <input type="number" id="origemY" value="0" step="0.1" required>
+          </label>
+        </div>
+
+        <label>Pacotes (um por linha): <span class="mono">id,peso,volume,x,y,prioridade</span></label>
+        <textarea id="pacotes" rows="8">PX-001,15,1.8,2,3,EXPRESSO
+PX-002,20,2.1,5,1,3
+PX-003,8,0.9,1,1,2</textarea>
+
+        <button type="submit">Executar Simulacao</button>
+      </form>
+    </section>
+
+    <section class="panel result-panel">
+      <h2>Ocupacao do Veiculo</h2>
+      <div class="ocupacao-wrap">
+        <div class="ocupacao-track">
+          <div id="ocupacao-bar" class="ocupacao-bar"></div>
+        </div>
+        <div id="ocupacao-label" class="ocupacao-label">0%</div>
+      </div>
+
+      <div class="kpis">
+        <div class="kpi-card">
+          <span class="kpi-title">Carga</span>
+          <strong id="kpi-carga">0 / 0 kg</strong>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-title">Volume</span>
+          <strong id="kpi-volume">0 / 0 m3</strong>
+        </div>
+        <div class="kpi-card">
+          <span class="kpi-title">Placa</span>
+          <strong id="kpi-placa">-</strong>
+        </div>
+      </div>
+
+      <h2>Romaneio (Ordem do Algoritmo)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>ID</th>
+              <th>Prioridade</th>
+              <th>Distancia</th>
+              <th>Peso (kg)</th>
+              <th>Volume (m3)</th>
+            </tr>
+          </thead>
+          <tbody id="romaneio-body">
+            <tr><td colspan="6" class="empty">Execute a simulacao para gerar o romaneio.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
