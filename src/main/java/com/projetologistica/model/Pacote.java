@@ -1,6 +1,8 @@
 package com.projetologistica.model;
 
 public class Pacote {
+    public static final int PRIORIDADE_EXPRESSO = 1;
+
     private String id;
     private double peso;
     private double volume;
@@ -75,6 +77,10 @@ public class Pacote {
             throw new IllegalArgumentException("Prioridade deve estar entre 1 e 5.");
         }
         this.prioridade = prioridade;
+    }
+
+    public boolean isExpresso() {
+        return prioridade == PRIORIDADE_EXPRESSO;
     }
 
     @Override
