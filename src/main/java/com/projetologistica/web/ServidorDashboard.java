@@ -5,7 +5,12 @@ import com.google.gson.JsonSyntaxException;
 import com.projetologistica.exception.CapacidadeExcedidaException;
 import com.projetologistica.model.Pacote;
 import com.projetologistica.model.Veiculo;
+import com.projetologistica.persistence.DatabaseManager;
+import com.projetologistica.service.HistoricoOperacionalService;
 import com.projetologistica.service.RoteirizadorDistribuicao;
+import com.projetologistica.service.dto.PacotePersistenciaDados;
+import com.projetologistica.service.dto.RomaneioPersistenciaDados;
+import com.projetologistica.service.dto.SimulacaoPersistenciaDados;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -27,11 +32,13 @@ public class ServidorDashboard {
 
     public static void main(String[] args) throws IOException {
         Locale.setDefault(Locale.US);
+        DatabaseManager.initialize();
+        HistoricoOperacionalService historicoService = new HistoricoOperacionalService(DatabaseManager.getDataSource());
 
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
-        server.createContext("/api/simular", new SimulacaoHandler());
+        server.createContext("/api/simular", new SimulacaoHandler(historicoService));
         server.createContext("/", new StaticResourceHandler());
         server.setExecutor(Executors.newFixedThreadPool(8));
         server.start();
@@ -40,31 +47,43 @@ public class ServidorDashboard {
     }
 
     static class SimulacaoHandler implements HttpHandler {
+        private static final String CANAL_WEB = "WEB";
+        private final HistoricoOperacionalService historicoService;
+
+        SimulacaoHandler(HistoricoOperacionalService historicoService) {
+            this.historicoService = historicoService;
+        }
+
         @Override
         public void handle(HttpExchange exchange) throws IOException {
+            String requestBody = "";
             try {
                 if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
                     writeJson(exchange, 405, Map.of("error", "Method not allowed"));
                     return;
                 }
 
-                String requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                requestBody = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                 SimulacaoRequest request = GSON.fromJson(requestBody, SimulacaoRequest.class);
                 validarRequest(request);
 
-                SimulacaoResponse response = processarSimulacao(request);
-                writeJson(exchange, 200, response);
+                ResultadoProcessamento resultado = processarSimulacao(request);
+                historicoService.registrarSucesso(CANAL_WEB, requestBody, resultado.persistenciaDados);
+                writeJson(exchange, 200, resultado.response);
             } catch (CapacidadeExcedidaException e) {
+                historicoService.registrarFalha(CANAL_WEB, requestBody, "FALHA_CAPACIDADE", e.getMessage());
                 writeJson(exchange, 409, Map.of(
                         "error", "CAPACIDADE_EXCEDIDA",
                         "message", e.getMessage()
                 ));
             } catch (IllegalArgumentException | JsonSyntaxException e) {
+                historicoService.registrarFalha(CANAL_WEB, requestBody, "FALHA_VALIDACAO", e.getMessage());
                 writeJson(exchange, 400, Map.of(
                         "error", "REQUISICAO_INVALIDA",
                         "message", e.getMessage()
                 ));
             } catch (Exception e) {
+                historicoService.registrarFalha(CANAL_WEB, requestBody, "ERRO_INTERNO", e.getMessage());
                 writeJson(exchange, 500, Map.of(
                         "error", "ERRO_INTERNO",
                         "message", "Falha inesperada no processamento da simulacao."
@@ -72,7 +91,7 @@ public class ServidorDashboard {
             }
         }
 
-        private SimulacaoResponse processarSimulacao(SimulacaoRequest request) {
+        private ResultadoProcessamento processarSimulacao(SimulacaoRequest request) {
             Veiculo veiculo = new Veiculo(
                     request.placa,
                     request.cargaMax,
@@ -81,24 +100,38 @@ public class ServidorDashboard {
             );
 
             List<Pacote> pacotes = new ArrayList<>();
+            List<PacotePersistenciaDados> pacotesPersistencia = new ArrayList<>();
             for (PacoteRequest pacoteRequest : request.pacotes) {
+                int prioridade = parsePrioridade(pacoteRequest.prioridade);
                 Pacote pacote = new Pacote(
                         pacoteRequest.id,
                         pacoteRequest.peso,
                         pacoteRequest.volume,
                         pacoteRequest.coordenadaX,
                         pacoteRequest.coordenadaY,
-                        parsePrioridade(pacoteRequest.prioridade)
+                        prioridade
                 );
 
                 veiculo.adicionarPacote(pacote);
                 pacotes.add(pacote);
+                pacotesPersistencia.add(new PacotePersistenciaDados(
+                        pacote.getId(),
+                        pacote.getPeso(),
+                        pacote.getVolume(),
+                        pacote.getCoordenadaX(),
+                        pacote.getCoordenadaY(),
+                        prioridade,
+                        "CARREGADO",
+                        null
+                ));
             }
 
             RoteirizadorDistribuicao roteirizador = new RoteirizadorDistribuicao();
             List<Pacote> romaneioOrdenado = roteirizador.ordenarSaida(pacotes, request.origemX, request.origemY);
 
             List<ItemRomaneio> itens = new ArrayList<>();
+            List<RomaneioPersistenciaDados> itensPersistencia = new ArrayList<>();
+            int ordemSaida = 1;
             for (Pacote pacote : romaneioOrdenado) {
                 double distancia = roteirizador.calcularDistanciaEuclidiana(
                         request.origemX,
@@ -109,14 +142,23 @@ public class ServidorDashboard {
                 itens.add(new ItemRomaneio(
                         pacote.getId(),
                         pacote.isExpresso() ? "EXPRESSO" : "PADRAO",
+                    ordemSaida,
                         distancia,
                         pacote.getPeso(),
                         pacote.getVolume()
                 ));
+
+                itensPersistencia.add(new RomaneioPersistenciaDados(
+                    pacote.getId(),
+                    ordemSaida,
+                    pacote.isExpresso() ? "EXPRESSO" : "PADRAO",
+                    distancia
+                ));
+                ordemSaida++;
             }
 
             double ocupacaoPercentual = (veiculo.getCargaAtual() / veiculo.getCargaMax()) * 100.0;
-            return new SimulacaoResponse(
+                SimulacaoResponse response = new SimulacaoResponse(
                     veiculo.getPlaca(),
                     veiculo.getCargaAtual(),
                     veiculo.getCargaMax(),
@@ -125,6 +167,22 @@ public class ServidorDashboard {
                     ocupacaoPercentual,
                     itens
             );
+
+                SimulacaoPersistenciaDados persistencia = new SimulacaoPersistenciaDados(
+                    veiculo.getPlaca(),
+                    veiculo.getCargaMax(),
+                    veiculo.getVolumeMax(),
+                    request.cargaInicial,
+                    request.origemX,
+                    request.origemY,
+                    veiculo.getCargaAtual(),
+                    veiculo.getVolumeAtual(),
+                    ocupacaoPercentual,
+                    pacotesPersistencia,
+                    itensPersistencia
+                );
+
+                return new ResultadoProcessamento(response, persistencia);
         }
 
         private int parsePrioridade(String prioridade) {
@@ -257,16 +315,28 @@ public class ServidorDashboard {
     static class ItemRomaneio {
         String id;
         String prioridade;
+        int ordem;
         double distancia;
         double peso;
         double volume;
 
-        ItemRomaneio(String id, String prioridade, double distancia, double peso, double volume) {
+        ItemRomaneio(String id, String prioridade, int ordem, double distancia, double peso, double volume) {
             this.id = id;
             this.prioridade = prioridade;
+            this.ordem = ordem;
             this.distancia = distancia;
             this.peso = peso;
             this.volume = volume;
+        }
+    }
+
+    static class ResultadoProcessamento {
+        SimulacaoResponse response;
+        SimulacaoPersistenciaDados persistenciaDados;
+
+        ResultadoProcessamento(SimulacaoResponse response, SimulacaoPersistenciaDados persistenciaDados) {
+            this.response = response;
+            this.persistenciaDados = persistenciaDados;
         }
     }
 }
