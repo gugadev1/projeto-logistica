@@ -2,9 +2,17 @@ package com.projetologistica.service.geocodificacao;
 
 import com.projetologistica.exception.CepInvalidoException;
 import com.projetologistica.exception.FalhaGeocodificacaoException;
+import com.projetologistica.persistence.CepCacheRepository;
+import com.projetologistica.persistence.CepCacheRepository.EntradaCache;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 public class CepResolverService {
@@ -13,28 +21,90 @@ public class CepResolverService {
 
     private final CepLookupClient cepLookupClient;
     private final GeocodificacaoClient geocodificacaoClient;
+    private final Function<String, Optional<EntradaCache>> cacheReader;
+    private final CacheWriter cacheWriter;
 
+    /**
+     * Interface funcional para escrita no cache.
+     * Recebe (cep, x, y, resposta) e persiste de forma silenciosa.
+     */
+    @FunctionalInterface
+    interface CacheWriter {
+        void salvar(String cep, double x, double y, RespostaViaCep resposta);
+    }
+
+    /** Construtor sem cache – usado nos testes unitários quando cache não é relevante. */
     public CepResolverService(CepLookupClient cepLookupClient, GeocodificacaoClient geocodificacaoClient) {
+        this(cepLookupClient, geocodificacaoClient, cep -> Optional.empty(), (c, x, y, r) -> {});
+    }
+
+    /** Construtor com cache em banco – usado em produção. */
+    public CepResolverService(CepLookupClient cepLookupClient, GeocodificacaoClient geocodificacaoClient, DataSource dataSource) {
+        this(cepLookupClient, geocodificacaoClient,
+                buildCacheReader(dataSource),
+                buildCacheWriter(dataSource));
+    }
+
+    /** Construtor completo – usado nos testes de integração de cache. */
+    CepResolverService(
+            CepLookupClient cepLookupClient,
+            GeocodificacaoClient geocodificacaoClient,
+            Function<String, Optional<EntradaCache>> cacheReader,
+            CacheWriter cacheWriter) {
         this.cepLookupClient = cepLookupClient;
         this.geocodificacaoClient = geocodificacaoClient;
+        this.cacheReader = cacheReader;
+        this.cacheWriter = cacheWriter;
+    }
+
+    private static Function<String, Optional<EntradaCache>> buildCacheReader(DataSource ds) {
+        CepCacheRepository repo = new CepCacheRepository();
+        return cep -> {
+            try (Connection conn = ds.getConnection()) {
+                return repo.buscar(conn, cep);
+            } catch (SQLException e) {
+                System.err.println("[CepResolverService] Falha ao buscar cache de CEP: " + e.getMessage());
+                return Optional.empty();
+            }
+        };
+    }
+
+    private static CacheWriter buildCacheWriter(DataSource ds) {
+        CepCacheRepository repo = new CepCacheRepository();
+        return (cep, x, y, resposta) -> {
+            try (Connection conn = ds.getConnection()) {
+                repo.salvar(conn, cep, x, y, resposta);
+            } catch (SQLException e) {
+                System.err.println("[CepResolverService] Falha ao salvar cache de CEP: " + e.getMessage());
+            }
+        };
     }
 
     /**
      * Resolve um CEP em coordenadas (X=lon, Y=lat).
      *
-     * Comportamento:
-     * - CEP malformado              → CepInvalidoException (erro de domínio, sem fallback)
-     * - CEP inexistente no ViaCEP   → CepNaoEncontradoException (erro de domínio, sem fallback)
-     * - Geocoder indisponível       → usa fallbackX/Y se fornecidos; caso contrário FalhaGeocodificacaoException
+     * Ordem de resolução:
+     * 1. Cache em banco  → ResolucaoCep com fonte CACHE
+     * 2. ViaCEP + Nominatim → ResolucaoCep com fonte API  (persiste no cache)
+     * 3. Fallback manual → ResolucaoCep com fonte FALLBACK_MANUAL (não persiste)
+     *
+     * Erros de domínio (sem fallback): CEP malformado, CEP inexistente no ViaCEP.
      */
     public ResolucaoCep resolver(String cep, Double fallbackX, Double fallbackY) {
         String cepNormalizado = normalizarCep(cep);
         validarFormato(cepNormalizado, cep);
 
+        Optional<EntradaCache> cached = cacheReader.apply(cepNormalizado);
+        if (cached.isPresent()) {
+            EntradaCache entrada = cached.get();
+            return new ResolucaoCep(entrada.coordenadaX(), entrada.coordenadaY(), ResolucaoCep.FONTE_CACHE);
+        }
+
         RespostaViaCep resposta = cepLookupClient.consultar(cepNormalizado);
 
         try {
             double[] coords = geocodificacaoClient.geocodificar(montarQueryEndereco(resposta));
+            cacheWriter.salvar(cepNormalizado, coords[0], coords[1], resposta);
             return new ResolucaoCep(coords[0], coords[1], ResolucaoCep.FONTE_API);
         } catch (FalhaGeocodificacaoException e) {
             if (fallbackX != null && fallbackY != null) {

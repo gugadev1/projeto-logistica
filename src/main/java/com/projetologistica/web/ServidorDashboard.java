@@ -41,7 +41,8 @@ public class ServidorDashboard {
         Locale.setDefault(Locale.US);
         DatabaseManager.initialize();
         HistoricoOperacionalService historicoService = new HistoricoOperacionalService(DatabaseManager.getDataSource());
-        CepResolverService cepResolverService = new CepResolverService(new ViaCepClient(), new NominatimClient());
+        CepResolverService cepResolverService = new CepResolverService(
+                new ViaCepClient(), new NominatimClient(), DatabaseManager.getDataSource());
 
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
@@ -114,9 +115,9 @@ public class ServidorDashboard {
         }
 
         private ResultadoProcessamento processarSimulacao(SimulacaoRequest request) {
-            double[] coordsOrigem = resolverCoordenadaOrigem(request);
-            double origemX = coordsOrigem[0];
-            double origemY = coordsOrigem[1];
+            ResolucaoCep origemResolvida = resolverOrigem(request);
+            double origemX = origemResolvida.coordenadaX();
+            double origemY = origemResolvida.coordenadaY();
 
             Veiculo veiculo = new Veiculo(
                     request.placa,
@@ -129,13 +130,13 @@ public class ServidorDashboard {
             List<PacotePersistenciaDados> pacotesPersistencia = new ArrayList<>();
             for (PacoteRequest pacoteRequest : request.pacotes) {
                 int prioridade = parsePrioridade(pacoteRequest.prioridade);
-                double[] coordsPacote = resolverCoordenadaPacote(pacoteRequest);
+                ResolucaoCep pacoteResolvido = resolverPacote(pacoteRequest);
                 Pacote pacote = new Pacote(
                         pacoteRequest.id,
                         pacoteRequest.peso,
                         pacoteRequest.volume,
-                        coordsPacote[0],
-                        coordsPacote[1],
+                        pacoteResolvido.coordenadaX(),
+                        pacoteResolvido.coordenadaY(),
                         prioridade
                 );
 
@@ -149,7 +150,9 @@ public class ServidorDashboard {
                         pacote.getCoordenadaY(),
                         prioridade,
                         "CARREGADO",
-                        null
+                        null,
+                        pacoteRequest.cep,
+                        pacoteResolvido.fonte()
                 ));
             }
 
@@ -206,34 +209,31 @@ public class ServidorDashboard {
                     veiculo.getVolumeAtual(),
                     ocupacaoPercentual,
                     pacotesPersistencia,
-                    itensPersistencia
+                    itensPersistencia,
+                    request.origemCep,
+                    origemResolvida.fonte()
                 );
 
                 return new ResultadoProcessamento(response, persistencia);
         }
 
-        private double[] resolverCoordenadaOrigem(SimulacaoRequest request) {
+        private ResolucaoCep resolverOrigem(SimulacaoRequest request) {
             if (request.origemCep != null && !request.origemCep.isBlank()) {
-                ResolucaoCep resolvido = cepResolverService.resolver(
-                        request.origemCep, request.origemX, request.origemY);
-                return new double[]{resolvido.coordenadaX(), resolvido.coordenadaY()};
+                return cepResolverService.resolver(request.origemCep, request.origemX, request.origemY);
             }
-            return new double[]{
-                    request.origemX != null ? request.origemX : 0.0,
-                    request.origemY != null ? request.origemY : 0.0
-            };
+            double x = request.origemX != null ? request.origemX : 0.0;
+            double y = request.origemY != null ? request.origemY : 0.0;
+            return new ResolucaoCep(x, y, null);
         }
 
-        private double[] resolverCoordenadaPacote(PacoteRequest pacoteRequest) {
+        private ResolucaoCep resolverPacote(PacoteRequest pacoteRequest) {
             if (pacoteRequest.cep != null && !pacoteRequest.cep.isBlank()) {
-                ResolucaoCep resolvido = cepResolverService.resolver(
+                return cepResolverService.resolver(
                         pacoteRequest.cep, pacoteRequest.coordenadaX, pacoteRequest.coordenadaY);
-                return new double[]{resolvido.coordenadaX(), resolvido.coordenadaY()};
             }
-            return new double[]{
-                    pacoteRequest.coordenadaX != null ? pacoteRequest.coordenadaX : 0.0,
-                    pacoteRequest.coordenadaY != null ? pacoteRequest.coordenadaY : 0.0
-            };
+            double x = pacoteRequest.coordenadaX != null ? pacoteRequest.coordenadaX : 0.0;
+            double y = pacoteRequest.coordenadaY != null ? pacoteRequest.coordenadaY : 0.0;
+            return new ResolucaoCep(x, y, null);
         }
 
         private int parsePrioridade(String prioridade) {

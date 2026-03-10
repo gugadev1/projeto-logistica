@@ -13,6 +13,8 @@ public record SimulacaoPersistenciaDados(
         double volumeFinal,
         double ocupacaoPercentual,
         List<PacotePersistenciaDados> pacotes,
-        List<RomaneioPersistenciaDados> romaneio
+        List<RomaneioPersistenciaDados> romaneio,
+        String origemCep,
+        String origemFonteResolucao
 ) {
 }

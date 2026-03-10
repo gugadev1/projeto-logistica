@@ -8,6 +8,8 @@ public record PacotePersistenciaDados(
         double coordenadaY,
         int prioridade,
         String status,
-        String erroValidacao
+        String erroValidacao,
+        String cep,
+        String fonteResolucao
 ) {
 }

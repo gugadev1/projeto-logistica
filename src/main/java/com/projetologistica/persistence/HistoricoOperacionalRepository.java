@@ -116,8 +116,10 @@ public class HistoricoOperacionalRepository {
                     carga_inicial,
                     carga_final,
                     volume_final,
-                    ocupacao_percentual
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ocupacao_percentual,
+                    origem_cep,
+                    origem_fonte
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """;
 
@@ -130,6 +132,8 @@ public class HistoricoOperacionalRepository {
             statement.setDouble(6, dados.cargaFinal());
             statement.setDouble(7, dados.volumeFinal());
             statement.setDouble(8, dados.ocupacaoPercentual());
+            statement.setString(9, dados.origemCep());
+            statement.setString(10, dados.origemFonteResolucao());
 
             try (ResultSet resultSet = statement.executeQuery()) {
                 resultSet.next();
@@ -149,8 +153,10 @@ public class HistoricoOperacionalRepository {
                     coordenada_y,
                     prioridade,
                     status,
-                    erro_validacao
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    erro_validacao,
+                    cep,
+                    fonte
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """;
 
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -163,6 +169,8 @@ public class HistoricoOperacionalRepository {
             statement.setInt(7, pacote.prioridade());
             statement.setString(8, pacote.status());
             statement.setString(9, pacote.erroValidacao());
+            statement.setString(10, pacote.cep());
+            statement.setString(11, pacote.fonteResolucao());
             statement.executeUpdate();
         }
     }
