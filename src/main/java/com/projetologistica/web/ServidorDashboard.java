@@ -3,11 +3,18 @@ package com.projetologistica.web;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import com.projetologistica.exception.CapacidadeExcedidaException;
+import com.projetologistica.exception.CepInvalidoException;
+import com.projetologistica.exception.CepNaoEncontradoException;
+import com.projetologistica.exception.FalhaGeocodificacaoException;
 import com.projetologistica.model.Pacote;
 import com.projetologistica.model.Veiculo;
 import com.projetologistica.persistence.DatabaseManager;
 import com.projetologistica.service.HistoricoOperacionalService;
 import com.projetologistica.service.RoteirizadorDistribuicao;
+import com.projetologistica.service.geocodificacao.CepResolverService;
+import com.projetologistica.service.geocodificacao.NominatimClient;
+import com.projetologistica.service.geocodificacao.ResolucaoCep;
+import com.projetologistica.service.geocodificacao.ViaCepClient;
 import com.projetologistica.service.dto.PacotePersistenciaDados;
 import com.projetologistica.service.dto.RomaneioPersistenciaDados;
 import com.projetologistica.service.dto.SimulacaoPersistenciaDados;
@@ -34,11 +41,12 @@ public class ServidorDashboard {
         Locale.setDefault(Locale.US);
         DatabaseManager.initialize();
         HistoricoOperacionalService historicoService = new HistoricoOperacionalService(DatabaseManager.getDataSource());
+        CepResolverService cepResolverService = new CepResolverService(new ViaCepClient(), new NominatimClient());
 
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "8080"));
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
-        server.createContext("/api/simular", new SimulacaoHandler(historicoService));
+        server.createContext("/api/simular", new SimulacaoHandler(historicoService, cepResolverService));
         server.createContext("/", new StaticResourceHandler());
         server.setExecutor(Executors.newFixedThreadPool(8));
         server.start();
@@ -49,9 +57,11 @@ public class ServidorDashboard {
     static class SimulacaoHandler implements HttpHandler {
         private static final String CANAL_WEB = "WEB";
         private final HistoricoOperacionalService historicoService;
+        private final CepResolverService cepResolverService;
 
-        SimulacaoHandler(HistoricoOperacionalService historicoService) {
+        SimulacaoHandler(HistoricoOperacionalService historicoService, CepResolverService cepResolverService) {
             this.historicoService = historicoService;
+            this.cepResolverService = cepResolverService;
         }
 
         @Override
@@ -76,6 +86,18 @@ public class ServidorDashboard {
                         "error", "CAPACIDADE_EXCEDIDA",
                         "message", e.getMessage()
                 ));
+            } catch (CepInvalidoException | CepNaoEncontradoException e) {
+                historicoService.registrarFalha(CANAL_WEB, requestBody, "FALHA_ENDERECO", e.getMessage());
+                writeJson(exchange, 422, Map.of(
+                        "error", "ENDERECO_INVALIDO",
+                        "message", e.getMessage()
+                ));
+            } catch (FalhaGeocodificacaoException e) {
+                historicoService.registrarFalha(CANAL_WEB, requestBody, "FALHA_GEOCODIFICACAO", e.getMessage());
+                writeJson(exchange, 503, Map.of(
+                        "error", "SERVICO_GEOCODIFICACAO_INDISPONIVEL",
+                        "message", e.getMessage()
+                ));
             } catch (IllegalArgumentException | JsonSyntaxException e) {
                 historicoService.registrarFalha(CANAL_WEB, requestBody, "FALHA_VALIDACAO", e.getMessage());
                 writeJson(exchange, 400, Map.of(
@@ -92,6 +114,10 @@ public class ServidorDashboard {
         }
 
         private ResultadoProcessamento processarSimulacao(SimulacaoRequest request) {
+            double[] coordsOrigem = resolverCoordenadaOrigem(request);
+            double origemX = coordsOrigem[0];
+            double origemY = coordsOrigem[1];
+
             Veiculo veiculo = new Veiculo(
                     request.placa,
                     request.cargaMax,
@@ -103,12 +129,13 @@ public class ServidorDashboard {
             List<PacotePersistenciaDados> pacotesPersistencia = new ArrayList<>();
             for (PacoteRequest pacoteRequest : request.pacotes) {
                 int prioridade = parsePrioridade(pacoteRequest.prioridade);
+                double[] coordsPacote = resolverCoordenadaPacote(pacoteRequest);
                 Pacote pacote = new Pacote(
                         pacoteRequest.id,
                         pacoteRequest.peso,
                         pacoteRequest.volume,
-                        pacoteRequest.coordenadaX,
-                        pacoteRequest.coordenadaY,
+                        coordsPacote[0],
+                        coordsPacote[1],
                         prioridade
                 );
 
@@ -127,15 +154,15 @@ public class ServidorDashboard {
             }
 
             RoteirizadorDistribuicao roteirizador = new RoteirizadorDistribuicao();
-            List<Pacote> romaneioOrdenado = roteirizador.ordenarSaida(pacotes, request.origemX, request.origemY);
+            List<Pacote> romaneioOrdenado = roteirizador.ordenarSaida(pacotes, origemX, origemY);
 
             List<ItemRomaneio> itens = new ArrayList<>();
             List<RomaneioPersistenciaDados> itensPersistencia = new ArrayList<>();
             int ordemSaida = 1;
             for (Pacote pacote : romaneioOrdenado) {
                 double distancia = roteirizador.calcularDistanciaEuclidiana(
-                        request.origemX,
-                        request.origemY,
+                        origemX,
+                        origemY,
                         pacote.getCoordenadaX(),
                         pacote.getCoordenadaY()
                 );
@@ -173,8 +200,8 @@ public class ServidorDashboard {
                     veiculo.getCargaMax(),
                     veiculo.getVolumeMax(),
                     request.cargaInicial,
-                    request.origemX,
-                    request.origemY,
+                    origemX,
+                    origemY,
                     veiculo.getCargaAtual(),
                     veiculo.getVolumeAtual(),
                     ocupacaoPercentual,
@@ -183,6 +210,30 @@ public class ServidorDashboard {
                 );
 
                 return new ResultadoProcessamento(response, persistencia);
+        }
+
+        private double[] resolverCoordenadaOrigem(SimulacaoRequest request) {
+            if (request.origemCep != null && !request.origemCep.isBlank()) {
+                ResolucaoCep resolvido = cepResolverService.resolver(
+                        request.origemCep, request.origemX, request.origemY);
+                return new double[]{resolvido.coordenadaX(), resolvido.coordenadaY()};
+            }
+            return new double[]{
+                    request.origemX != null ? request.origemX : 0.0,
+                    request.origemY != null ? request.origemY : 0.0
+            };
+        }
+
+        private double[] resolverCoordenadaPacote(PacoteRequest pacoteRequest) {
+            if (pacoteRequest.cep != null && !pacoteRequest.cep.isBlank()) {
+                ResolucaoCep resolvido = cepResolverService.resolver(
+                        pacoteRequest.cep, pacoteRequest.coordenadaX, pacoteRequest.coordenadaY);
+                return new double[]{resolvido.coordenadaX(), resolvido.coordenadaY()};
+            }
+            return new double[]{
+                    pacoteRequest.coordenadaX != null ? pacoteRequest.coordenadaX : 0.0,
+                    pacoteRequest.coordenadaY != null ? pacoteRequest.coordenadaY : 0.0
+            };
         }
 
         private int parsePrioridade(String prioridade) {
@@ -208,6 +259,22 @@ public class ServidorDashboard {
             }
             if (request.pacotes == null || request.pacotes.isEmpty()) {
                 throw new IllegalArgumentException("Informe ao menos um pacote para simulacao.");
+            }
+            boolean origemCepInformado = request.origemCep != null && !request.origemCep.isBlank();
+            boolean origemCoordInformada = request.origemX != null && request.origemY != null;
+            if (!origemCepInformado && !origemCoordInformada) {
+                throw new IllegalArgumentException(
+                        "Informe a origem por CEP (origemCep) ou por coordenadas (origemX e origemY).");
+            }
+            for (int i = 0; i < request.pacotes.size(); i++) {
+                PacoteRequest p = request.pacotes.get(i);
+                boolean cepPacote = p.cep != null && !p.cep.isBlank();
+                boolean coordPacote = p.coordenadaX != null && p.coordenadaY != null;
+                if (!cepPacote && !coordPacote) {
+                    throw new IllegalArgumentException(
+                            "Pacote na posicao " + (i + 1)
+                                    + " deve ter CEP (cep) ou coordenadas (coordenadaX e coordenadaY).");
+                }
             }
         }
     }
@@ -270,8 +337,9 @@ public class ServidorDashboard {
         double cargaMax;
         double volumeMax;
         double cargaInicial;
-        double origemX;
-        double origemY;
+        String origemCep;   // opcional – quando presente, CEP é resolvido em coordenadas
+        Double origemX;     // obrigatório se origemCep ausente; fallback quando origemCep presente
+        Double origemY;
         List<PacoteRequest> pacotes;
     }
 
@@ -279,8 +347,9 @@ public class ServidorDashboard {
         String id;
         double peso;
         double volume;
-        double coordenadaX;
-        double coordenadaY;
+        String cep;          // opcional – quando presente, CEP é resolvido em coordenadas
+        Double coordenadaX;  // obrigatório se cep ausente; fallback quando cep presente
+        Double coordenadaY;
         String prioridade;
     }
 
